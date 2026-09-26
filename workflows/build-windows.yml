@@ -1,0 +1,118 @@
+name: Build Windows installer
+
+# Runs on every push and PR, plus you can trigger it manually from the
+# Actions tab. No Windows machine needed on your end — GitHub supplies
+# the windows-latest runner.
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python build dependencies
+        run: pip install -r requirements.txt
+
+      - name: Download static ffmpeg for Windows
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          $zipUrl = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+          Invoke-WebRequest -Uri $zipUrl -OutFile ffmpeg.zip
+          Expand-Archive -Path ffmpeg.zip -DestinationPath ffmpeg_extracted
+          $bin = Get-ChildItem -Path ffmpeg_extracted -Recurse -Filter ffmpeg.exe | Select-Object -First 1
+          $play = Get-ChildItem -Path ffmpeg_extracted -Recurse -Filter ffplay.exe | Select-Object -First 1
+          Copy-Item $bin.FullName -Destination assets\ffmpeg.exe
+          Copy-Item $play.FullName -Destination assets\ffplay.exe
+          Write-Host "ffmpeg.exe and ffplay.exe staged in assets"
+
+      - name: Source import check
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          Get-ChildItem src -Filter *.py | ForEach-Object { Write-Host $_.Name }
+          python -c "import sys; sys.path.insert(0, 'src'); import app_gui; print('app_gui imports OK')"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Build with PyInstaller
+        run: pyinstaller build.spec
+
+      - name: Smoke test — launch the built exe and confirm it doesn't crash
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $exe = "dist\RadioCastOS\RadioCastOS.exe"
+          $stdout = "smoke-test-stdout.log"
+          $stderr = "smoke-test-stderr.log"
+
+          Write-Host "Launching $exe ..."
+          $proc = Start-Process -FilePath $exe -PassThru `
+            -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+
+          Start-Sleep -Seconds 8
+
+          if ($proc.HasExited) {
+            Write-Host "--- stdout ---"
+            Get-Content $stdout -ErrorAction SilentlyContinue
+            Write-Host "--- stderr ---"
+            Get-Content $stderr -ErrorAction SilentlyContinue
+            Write-Error "RadioCastOS.exe exited on its own within 8 seconds (exit code $($proc.ExitCode)) — see logs above. This usually means an import/startup error, not a real crash-on-idle."
+            exit 1
+          }
+
+          Write-Host "Still running after 8s — startup smoke test passed."
+          Stop-Process -Id $proc.Id -Force
+
+          # This CI runner has no real microphone/loopback audio device, so
+          # this only proves the app starts and the window survives —
+          # it is NOT a substitute for testing actual audio capture and
+          # streaming on a real machine (see README).
+
+      - name: Upload smoke test logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-logs
+          path: smoke-test-std*.log
+          if-no-files-found: ignore
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = (Get-Command ISCC.exe -ErrorAction SilentlyContinue).Source
+          if (-not $iscc) { $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" }
+          Write-Host "Using: $iscc"
+          & $iscc installer.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Get-ChildItem -Recurse -Filter *.exe Output
+
+      - name: Upload unpacked app (folder build)
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadioCastOS-app
+          path: dist/RadioCastOS/
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: RadioCastOS-Setup
+          path: Output/RadioCastOS-Setup.exe

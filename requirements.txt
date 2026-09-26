@@ -1,0 +1,8 @@
+# RadioCastOS runs on the Python standard library (tkinter, subprocess,
+# socket, urllib, json). The only optional runtime package is mutagen, which
+# imports audio tags (artist, album, genre, year, BPM); without it the app
+# falls back to parsing filenames.
+#
+# PyInstaller is only needed to *build* the Windows .exe, not to run the app.
+pyinstaller==6.10.0
+mutagen>=1.47.0
